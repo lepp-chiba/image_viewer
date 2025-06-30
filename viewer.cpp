@@ -14,49 +14,6 @@
 // libtiff
 #include <tiffio.h>
 
-// --- グローバル変数 ---
-// シェーダ
-const char* vertexShaderSource = R"glsl(
-#version 330 core
-layout (location = 0) in vec3 aPos;
-layout (location = 1) in vec2 aTexCoord;
-
-out vec2 TexCoord;
-
-void main()
-{
-    gl_Position = vec4(aPos, 1.0);
-    TexCoord = aTexCoord;
-}
-)glsl";
-
-// <--- フラグメントシェーダを更新 ---
-const char* fragmentShaderSource = R"glsl(
-#version 330 core
-out vec4 FragColor;
-in vec2 TexCoord;
-
-uniform sampler2D ourTexture;
-uniform float u_minVal; // <--- 輝度の最小値 (0.0-1.0)
-uniform float u_maxVal; // <--- 輝度の最大値 (0.0-1.0)
-
-void main()
-{
-    // テクスチャから正規化されたfloat値(0.0-1.0)として輝度を読み込む
-    float intensity = texture(ourTexture, TexCoord).r;
-
-    // u_minValとu_maxValを使って、輝度範囲を0.0-1.0に引き伸ばす
-    // (u_maxVal - u_minVal)が0に近い場合、0除算を避けるためにmaxで保護
-    float range = max(u_maxVal - u_minVal, 0.00001);
-    float normalized_intensity = (intensity - u_minVal) / range;
-    
-    // clampで最終的な値を0.0-1.0の範囲に収める
-    normalized_intensity = clamp(normalized_intensity, 0.0, 1.0);
-
-    FragColor = vec4(vec3(normalized_intensity), 1.0);
-}
-)glsl";
-
 // <--- 画像情報をまとめる構造体 ---
 struct ImageInfo {
     GLuint textureID;
@@ -75,9 +32,7 @@ GLFWwindow* g_window = nullptr;
 std::vector<GLuint> g_textureIDs;
 std::vector<std::string> g_filenames;
 
-// --- 関数 ---
-
-// ウィンドウタイトルを更新するヘルパー関数
+// ウィンドウタイトルを更新
 void updateWindowTitle() {
     if (g_images.empty()) return;
     std::string title = "TIFF Viewer: " + g_images[g_currentImageIndex].filename;
@@ -114,7 +69,6 @@ void key_callback(GLFWwindow* window, int key, int scancode, int action, int mod
 
 
 // 16bit TIFFファイルを読み込む関数
-// 成功した場合はuint16_tのポインタを、失敗した場合はnullptrを返す
 uint16_t* load_16bit_tiff(const char* filename, int& width, int& height) {
     TIFF* tif = TIFFOpen(filename, "r");
     if (!tif) {
@@ -162,6 +116,54 @@ uint16_t* load_16bit_tiff(const char* filename, int& width, int& height) {
     return image_data;
 }
 
+// --- シェーダーヘルパー関数の実装 ---
+GLuint compileShader(const char* shaderPath, GLenum type) {
+    GLuint shader = glCreateShader(type);
+    std::ifstream file(shaderPath, std::ios::in);
+    if (!file.is_open()) {
+        std::cerr << "ERROR::SHADER::FILE_NOT_FOUND: " << shaderPath << std::endl;
+        return 0;
+    }
+    std::stringstream stream;
+    stream << file.rdbuf();
+    file.close();
+    std::string code = stream.str();
+    
+    const char* source = code.c_str();
+    glShaderSource(shader, 1, &source, NULL);
+    glCompileShader(shader);
+    int success;
+    glGetShaderiv(shader, GL_COMPILE_STATUS, &success);
+    if (!success) {
+        char infoLog[512];
+        glGetShaderInfoLog(shader, 512, NULL, infoLog);
+        std::cerr << "ERROR::SHADER::COMPILATION_FAILED: " << shaderPath << "\n" << infoLog << std::endl;
+        return 0;
+    }
+    return shader;
+}
+
+GLuint createShaderProgram(const char* vsPath, const char* fsPath) {
+    GLuint vs = compileShader(vsPath, GL_VERTEX_SHADER);
+    GLuint fs = compileShader(fsPath, GL_FRAGMENT_SHADER);
+    if (vs == 0 || fs == 0) return 0;
+    GLuint program = glCreateProgram();
+    glAttachShader(program, vs);
+    glAttachShader(program, fs);
+    glLinkProgram(program);
+    int success;
+    glGetProgramiv(program, GL_LINK_STATUS, &success);
+    if (!success) {
+        char infoLog[512];
+        glGetProgramInfoLog(program, 512, NULL, infoLog);
+        std::cerr << "ERROR::SHADER::PROGRAM::LINKING_FAILED\n" << infoLog << std::endl;
+        return 0;
+    }
+    glDeleteShader(vs);
+    glDeleteShader(fs);
+    return program;
+}
+
 
 int main(int argc, char* argv[]) {
     if (argc < 2) {
@@ -194,24 +196,7 @@ int main(int argc, char* argv[]) {
     }
 
     // --- シェーダのコンパイル ---
-    GLuint vertexShader = glCreateShader(GL_VERTEX_SHADER);
-    glShaderSource(vertexShader, 1, &vertexShaderSource, NULL);
-    glCompileShader(vertexShader);
-    // (エラーチェックは省略)
-
-    GLuint fragmentShader = glCreateShader(GL_FRAGMENT_SHADER);
-    glShaderSource(fragmentShader, 1, &fragmentShaderSource, NULL);
-    glCompileShader(fragmentShader);
-    // (エラーチェックは省略)
-
-    GLuint shaderProgram = glCreateProgram();
-    glAttachShader(shaderProgram, vertexShader);
-    glAttachShader(shaderProgram, fragmentShader);
-    glLinkProgram(shaderProgram);
-    // (エラーチェックは省略)
-    glDeleteShader(vertexShader);
-    glDeleteShader(fragmentShader);
-
+    GLuint shaderProgram = createShaderProgram("shaders/shader.vert", "shaders/shader.frag");
 
     // --- 頂点データ (画面全体を覆う四角形) ---
     float vertices[] = {
